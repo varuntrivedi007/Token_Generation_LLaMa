@@ -1,0 +1,17 @@
+torch>=2.2
+transformers>=4.40
+accelerate>=0.30
+sentencepiece
+protobuf
+numpy
+matplotlib
+seaborn
+pandas
+huggingface_hub
+# GGUF / llama.cpp backend for Q8/Q4 on MPS/CPU (install per platform):
+#   macOS (Metal):   CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python
+#   Linux CPU:       pip install llama-cpp-python
+#   Linux CUDA:      CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+#   Windows CPU:     pip install llama-cpp-python
+# Optional (bitsandbytes, CUDA weight quant):
+# bitsandbytes>=0.43
