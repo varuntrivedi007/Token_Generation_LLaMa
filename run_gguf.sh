@@ -1,11 +1,3 @@
-#!/usr/bin/env bash
-# Run Q8 + Q4 GGUF benchmarks. Defaults target M4 Pro (MPS + CPU).
-# Usage:
-#   ./run_gguf.sh mps        # M4 Pro Metal
-#   ./run_gguf.sh cpu        # M4 Pro CPU
-#   ./run_gguf.sh windows    # Windows CPU (device=cpu, platform_tag=windows_cpu)
-#   ./run_gguf.sh cuda       # Colab T4 (llama-cpp-python built with CUDA)
-
 set -e
 
 TARGET="${1:-mps}"
@@ -28,7 +20,7 @@ case "$TARGET" in
         echo "Unknown target: $TARGET"; exit 1 ;;
 esac
 
-echo "=== GGUF benchmark: target=$TARGET device=$DEVICE platform_tag=$PLATFORM_TAG ==="
+echo "GGUF benchmark: target=$TARGET device=$DEVICE platform_tag=$PLATFORM_TAG "
 
 for PRECISION in q8 q4; do
     echo ""
@@ -44,4 +36,4 @@ for PRECISION in q8 q4; do
 done
 
 echo ""
-echo "=== GGUF benchmark done for $TARGET ==="
+echo "GGUF benchmark done for $TARGET"

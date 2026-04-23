@@ -1,14 +1,3 @@
-"""
-GGUF / llama.cpp benchmark harness.
-
-Runs the same TTFT / decode / throughput protocol as benchmark.py, but against
-llama.cpp-quantized GGUF models (Q8_0, Q4_K_M). This lets us measure weight
-quantization on platforms where bitsandbytes is unavailable (MPS, CPU).
-
-Output JSON schema mirrors benchmark.py so analysis/merge_results.py picks it
-up transparently.
-"""
-
 import argparse
 import gc
 import json
@@ -70,7 +59,6 @@ class TrialResult:
 
 
 def download_gguf(precision: str) -> str:
-    """Download the GGUF file for given precision if missing. Returns local path."""
     if precision not in GGUF_FILES:
         raise ValueError(f"No GGUF mapping for precision={precision}")
     from huggingface_hub import hf_hub_download
@@ -86,7 +74,7 @@ def download_gguf(precision: str) -> str:
 
 
 def load_llama(gguf_path: str, device: str, n_ctx: int):
-    """Instantiate llama-cpp-python Llama wrapper."""
+    
     from llama_cpp import Llama
     n_gpu_layers = -1 if device in ("mps", "cuda") else 0
     kwargs = dict(
@@ -101,7 +89,7 @@ def load_llama(gguf_path: str, device: str, n_ctx: int):
 
 
 def build_prompt_tokens(llm, target_tokens: int) -> List[int]:
-    """Produce exactly target_tokens tokens using a deterministic filler."""
+    
     filler = (
         "The quick brown fox jumps over the lazy dog. "
         "Language models generate one token at a time. "
@@ -122,7 +110,7 @@ def run_trial(llm, input_tokens: List[int], output_tokens: int) -> TrialResult:
     per_token_ms: List[float] = []
     total_start = time.perf_counter_ns()
 
-    # TTFT: full prompt eval + first greedy sample
+    
     t0 = time.perf_counter_ns()
     llm.eval(input_tokens)
     next_tok = int(llm.sample(top_k=1, top_p=1.0, temp=0.0))
@@ -181,7 +169,7 @@ def run_config(args) -> dict:
     print(f"[gguf] loaded: {gguf_path}")
 
     max_plen = max(args.prompt_lengths)
-    # Context needs to fit prompt + generation, plus some slack.
+    
     n_ctx = max(2048, max_plen + args.output_tokens + 64)
     llm = load_llama(gguf_path, device, n_ctx=n_ctx)
 

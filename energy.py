@@ -1,13 +1,3 @@
-"""
-Phase 5: Energy-per-token estimation on macOS via `powermetrics`.
-
-Spawns `sudo powermetrics` in the background, runs a benchmark workload,
-then parses CPU+GPU power samples and correlates them with token timing.
-
-Usage:
-    sudo python energy.py --device mps --prompt-length 128 --output-tokens 128
-"""
-
 import argparse
 import json
 import os

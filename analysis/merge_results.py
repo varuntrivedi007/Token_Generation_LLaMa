@@ -1,5 +1,3 @@
-"""Merge per-platform JSON benchmark results into a single pandas DataFrame."""
-
 import json
 from pathlib import Path
 import pandas as pd

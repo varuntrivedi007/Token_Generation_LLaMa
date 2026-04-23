@@ -1,10 +1,3 @@
-"""
-Phase 2: Latency decomposition via PyTorch forward hooks.
-
-Measures per-component latency (embedding, QKV, attention, MLP, norm,
-LM head, sampling, framework overhead) during token generation.
-"""
-
 import argparse
 import gc
 import json
@@ -47,8 +40,7 @@ def classify(name: str) -> str:
 
 
 class HookTimer:
-    """Attach pre/post hooks to every leaf module and bucket elapsed times."""
-
+    
     def __init__(self, model, device: str):
         self.model = model
         self.device = device
@@ -82,7 +74,7 @@ class HookTimer:
         return hook
 
     def attach(self):
-        # Attach to all named modules (non-root).
+        
         for name, module in self.model.named_modules():
             if name == "":
                 continue

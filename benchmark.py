@@ -1,11 +1,3 @@
-"""
-Token-generation latency benchmark harness.
-
-Works across MPS (Apple Silicon), CUDA (NVIDIA), and CPU backends.
-Measures TTFT, per-token latency, end-to-end time, throughput with proper
-device synchronization, warmup, and IQR-based outlier filtering.
-"""
-
 import argparse
 import gc
 import json
@@ -33,7 +25,7 @@ DEFAULT_TRIALS = 10
 
 
 class Timer:
-    """Device-aware wall-clock timer returning milliseconds."""
+    
 
     def __init__(self, device: str):
         self.device = device
@@ -106,8 +98,8 @@ class TrialResult:
 
 
 def build_prompt(tokenizer, target_tokens: int) -> torch.Tensor:
-    """Build a prompt with exactly target_tokens tokens (approx)."""
-    # Use a deterministic filler — repeat a short sentence then truncate.
+    
+    
     filler = (
         "The quick brown fox jumps over the lazy dog. "
         "Language models generate one token at a time. "
@@ -135,7 +127,7 @@ def run_trial(
     per_token_ms: List[float] = []
     timer = Timer(device)
 
-    # Total timer
+    
     total_timer = Timer(device)
     total_timer.start()
 
@@ -147,7 +139,7 @@ def run_trial(
     past = out.past_key_values
     next_token = torch.argmax(logits, dim=-1, keepdim=True)
     ttft_ms = ttft_timer.stop()
-    per_token_ms.append(ttft_ms)  # first token = TTFT
+    per_token_ms.append(ttft_ms)  
 
 
     for _ in range(output_tokens - 1):
@@ -267,7 +259,7 @@ def run_config(args) -> dict:
         ttft_vals = [t.ttft_ms for t in trials]
         total_vals = [t.total_ms for t in trials]
         thpt_vals = [t.throughput_tok_per_s for t in trials]
-        # Per-token latency: exclude first (TTFT) and compute median per trial
+        
         decode_vals = []
         for t in trials:
             if len(t.per_token_ms) > 1:

@@ -1,11 +1,3 @@
-"""
-Phase 4: INT8 KV-cache quantization.
-
-Wraps a LLaMA model so that past K/V tensors are stored as int8 (per-head,
-per-token symmetric quantization) and dequantized to fp16 on read. Compares
-latency, memory, and perplexity against the unquantized baseline.
-"""
-
 import argparse
 import gc
 import json
@@ -23,27 +15,26 @@ from benchmark import MODEL_IDS, Timer, build_prompt, load_model, summarize, env
 
 
 def _extract_kv_pairs(cache):
-    """Extract (k, v) pairs from any DynamicCache variant or legacy tuple."""
-    
+   
     if hasattr(cache, "layers") and len(getattr(cache, "layers", [])) > 0 \
        and hasattr(cache.layers[0], "keys"):
         return [(L.keys, L.values) for L in cache.layers]
-    # Mid-era: .key_cache / .value_cache lists
+    
     if hasattr(cache, "key_cache") and hasattr(cache, "value_cache"):
         return list(zip(cache.key_cache, cache.value_cache))
-    # Legacy: to_legacy_cache() returns tuple of (k,v) per layer
+    
     if hasattr(cache, "to_legacy_cache"):
         try:
             legacy = cache.to_legacy_cache()
             return [(k, v) for (k, v) in legacy]
         except Exception:
             pass
-    # Fallback: plain tuple of tuples
+    
     return [(k, v) for (k, v) in cache]
 
 
 def _rebuild_cache_from_pairs(pairs):
-    """Rebuild a DynamicCache from (k, v) pairs (one per layer)."""
+    
     cache = DynamicCache()
     for i, (k, v) in enumerate(pairs):
         cache.update(k, v, i)
@@ -51,13 +42,6 @@ def _rebuild_cache_from_pairs(pairs):
 
 
 class QuantizedKVCache:
-    """
-    Per-layer INT8 symmetric-quantized KV cache.
-
-    Stores K and V as int8 tensors plus a per-(layer, head, token) fp16 scale.
-    dequantize() rematerializes fp16 tensors for attention compute.
-    """
-
     def __init__(self, num_layers: int):
         self.k_int8: List[torch.Tensor] = [None] * num_layers
         self.v_int8: List[torch.Tensor] = [None] * num_layers
@@ -106,15 +90,6 @@ class QuantizedKVCache:
                 total += t.numel() * 2  # fp16
         return total
 
-
-# ---------------------------------------------------------------------------
-# Decode loop with quantized KV cache
-#
-# Hugging Face's LLaMA stores past_key_values as a tuple of (k, v) per layer.
-# We intercept after each forward to re-quantize the growing cache, then
-# replace the model's cache with a dequantized version on the next step.
-# ---------------------------------------------------------------------------
-
 @torch.inference_mode()
 def generate_quantized_kv(model, tokenizer, input_ids, output_tokens, device) -> dict:
     input_ids = input_ids.to(model.device)
@@ -122,7 +97,7 @@ def generate_quantized_kv(model, tokenizer, input_ids, output_tokens, device) ->
     timer = Timer(device)
     timer.start()
 
-    # Prefill
+   
     out = model(input_ids=input_ids, use_cache=True)
     pairs = _extract_kv_pairs(out.past_key_values)
     num_layers = len(pairs)
@@ -187,7 +162,7 @@ def perplexity(model, tokenizer, text: str, device: str, use_qkv: bool = False) 
     if not use_qkv:
         out = model(input_ids=ids, labels=ids)
         return math.exp(out.loss.item())
-    # Quantized path: run token-by-token with requantized KV
+    
     losses = []
     past = None
     for t in range(1, ids.shape[1]):
