@@ -1,195 +1,312 @@
-# LLM Token-Generation Latency Benchmark
+# Token-Generation Latency Benchmarking in LLaMA
 
-Cross-platform benchmark for decomposing and analyzing autoregressive token-generation latency in LLaMA-family models. Tests TTFT, per-token latency, throughput, and memory-bandwidth utilization across five hardware platforms using both PyTorch and llama.cpp (GGUF) backends.
+**CECS 574 · Advanced Computer Architecture · CSULB · Spring 2026**
+Avadh Maheshbhai Joshi · Eva Mewada · Varun Dushyant Trivedi
 
-## Hardware Tested
+End-to-end reproducible study of autoregressive decode latency in TinyLlama-1.1B across 5 hardware platforms (Apple M4 Pro MPS/CPU, NVIDIA T4, RTX 3070 Laptop, Intel i7-11370H), 3 precisions (FP16, INT8/Q8_0, INT4/Q4_K_M), and 6 prompt lengths (32–1024 tokens). Validates the roofline memory-bandwidth bound, decomposes per-component latency via PyTorch forward hooks, and quantifies weight-vs-KV-cache quantization tradeoffs.
 
-| Platform | Backend | Memory BW |
-|---|---|---|
-| Apple M4 Pro | MPS (Metal) | 273 GB/s |
-| Apple M4 Pro | CPU | ~100 GB/s |
-| NVIDIA T4 (Colab) | CUDA | 320 GB/s HBM2 |
-| NVIDIA RTX 3070 Laptop | CUDA | 448 GB/s spec |
-| Intel i7-11370H | CPU | ~50 GB/s DDR4 |
+---
 
-## Models
+## 1. Repository Layout
 
-- **TinyLlama-1.1B-Chat** (`TinyLlama/TinyLlama-1.1B-Chat-v1.0`) — fits all platforms
-- **OpenLLaMA-3B** (`openlm-research/open_llama_3b`) — for model-scaling experiments
+```
+Token_Generation/
+├── benchmark.py             # Phase 1  PyTorch harness (FP16, INT8/INT4 via bitsandbytes)
+├── benchmark_gguf.py        # Phase 1b llama.cpp/GGUF harness (Q8_0, Q4_K_M)
+├── decomposition.py         # Phase 2  forward-hook component-level latency
+├── optimization.py          # Phase 3  symmetric per-(head,token) INT8 KV-cache quant
+├── energy.py                # Phase 4  powermetrics J/token (macOS only)
+├── run_all.sh               # Full PyTorch pipeline
+├── run_gguf.sh              # GGUF Q8 + Q4 sweep
+├── analysis/
+│   ├── merge_results.py     # Cross-platform JSON → results/merged.csv
+│   ├── plot_results.py      # Figures 01–06, 11–13
+│   └── roofline.py          # Figures 09 (roofline) + 10 (bandwidth utilization)
+├── results/
+│   ├── <platform>/                          # raw timing JSON
+│   ├── decomposition_<device>[_win]/        # decomp JSON
+│   ├── optimization_<device>[_win]/         # KV-quant JSON
+│   └── merged.csv                           # produced by analysis/merge_results.py
+├── figures/                 # final figures (20 PNGs)
+├── requirements.txt
+└── README.md
+```
 
-## Precisions
+---
 
-- **FP16** — PyTorch baseline on all platforms
-- **Q8_0 / Q4_K_M** — GGUF via llama.cpp on all platforms
-- **INT8 / INT4 weight** — bitsandbytes on CUDA only
+## 2. Hardware Targets
 
-## Setup
+| Platform tag      | Device  | Hardware                | Peak BW (GB/s) | Peak FP16 (TFLOPS) | Backend(s)                |
+| ----------------- | ------- | ----------------------- | -------------- | ------------------ | ------------------------- |
+| `m4pro_mps`       | mps     | Apple M4 Pro            | 273            | 4.5                | PyTorch MPS, llama.cpp Metal |
+| `m4pro_cpu`       | cpu     | Apple M4 Pro (P-cores)  | 100            | 1.5                | PyTorch CPU, llama.cpp NEON |
+| `colab_t4`        | cuda    | NVIDIA T4 (Colab)       | 320            | 65.0               | PyTorch CUDA, llama.cpp CUDA, bitsandbytes |
+| `windows_3070`    | cuda    | NVIDIA RTX 3070 Laptop  | 448            | 20.0               | PyTorch CUDA, llama.cpp CUDA |
+| `windows_cpu`     | cpu     | Intel i7-11370H (Tiger Lake) | 50         | 1.0                | PyTorch CPU, llama.cpp AVX2 |
+
+All five not required — each platform writes an independent JSON tree, and `analysis/merge_results.py` concatenates whatever is present.
+
+### 2.1 Default output-directory mapping
+
+`benchmark.py`, `decomposition.py`, `optimization.py` derive the `results/` subdir from `--device`:
+
+| `--device` | `benchmark.py` default          | `decomposition.py` default        | `optimization.py` default        |
+| ---------- | ------------------------------- | --------------------------------- | -------------------------------- |
+| `mps`      | `results/m4pro_mps`             | `results/decomposition_mps`       | `results/optimization_mps`       |
+| `cpu`      | `results/m4pro_cpu`             | `results/decomposition_cpu`       | `results/optimization_cpu`       |
+| `cuda`     | `results/colab_t4`              | `results/decomposition_cuda`      | `results/optimization_cuda`      |
+
+For Windows (RTX 3070 + i7-11370H), pass `--output-dir <path>` so they don't collide with Colab T4 / M4 CPU buckets — see §6.4–6.5. For `benchmark_gguf.py`, use `--platform-tag windows_3070` / `windows_cpu` (different flag; the GGUF script supports it).
+
+---
+
+## 3. Prerequisites
+
+* Python ≥ 3.10
+* `git`, `bash`, `curl` or `wget`
+* Hugging Face account + access token (`huggingface-cli login`) — TinyLlama gated on some mirrors
+* Platform compilers/SDKs for `llama-cpp-python`:
+  * macOS: Xcode CLT, Metal headers (`xcode-select --install`)
+  * Linux/CUDA: NVIDIA CUDA Toolkit ≥ 11.8, matching driver
+  * Windows: MSVC build tools 2019+ (or run inside WSL2)
+
+---
+
+## 4. Setup
+
+### 4.1 Clone and create venv
 
 ```bash
+git clone <repo-url> Token_Generation
+cd Token_Generation
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-**llama.cpp (GGUF backend) — platform-specific install:**
+### 4.2 Install `llama-cpp-python` (per platform)
 
 ```bash
-# macOS Metal
-CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python
+# macOS Metal (M4 Pro)
+CMAKE_ARGS="-DGGML_METAL=on" pip install --no-cache-dir llama-cpp-python
 
-# Linux CUDA
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+# Linux CUDA (T4 / 3070)
+CMAKE_ARGS="-DGGML_CUDA=on" pip install --no-cache-dir llama-cpp-python
 
 # Linux / Windows CPU
 pip install llama-cpp-python
 ```
 
-**CUDA weight quantization (optional):**
-```bash
-pip install bitsandbytes>=0.43
-```
-
-## Running Benchmarks
-
-### PyTorch backend (FP16, INT8/INT4 on CUDA)
+### 4.3 Optional: bitsandbytes (CUDA INT8/INT4 weight quant)
 
 ```bash
-# M4 Pro — MPS
-python benchmark.py --device mps --model tinyllama --precision fp16
-
-# M4 Pro — CPU
-python benchmark.py --device cpu --model tinyllama --precision fp16
-
-# NVIDIA GPU — CUDA
-python benchmark.py --device cuda --model tinyllama --precision fp16
-python benchmark.py --device cuda --model tinyllama --precision q8
-python benchmark.py --device cuda --model tinyllama --precision q4
-
-# Smoke test (single length, few trials)
-python benchmark.py --device mps --prompt-lengths 128 --trials 3 --warmup 1
+pip install "bitsandbytes>=0.43"      # CUDA only
 ```
 
-Results land in `results/<platform>/<model>_<precision>_<device>.json`.
-
-### GGUF backend (Q8_0 + Q4_K_M via llama.cpp)
-
-Download GGUF model files first (e.g. from Hugging Face Hub), then:
+### 4.4 Authenticate with Hugging Face
 
 ```bash
-# macOS MPS
-bash run_gguf.sh mps
-
-# macOS / Linux CPU
-bash run_gguf.sh cpu
-
-# Windows CPU
-bash run_gguf.sh windows
-
-# CUDA
-bash run_gguf.sh cuda
+huggingface-cli login                 # paste user-access token
 ```
 
-Or run directly:
+### 4.5 Model assets
+
+* **PyTorch FP16 weights** — pulled automatically by `transformers.AutoModelForCausalLM.from_pretrained` on first run; cached under `~/.cache/huggingface/`.
+* **GGUF Q8_0 / Q4_K_M** — `benchmark_gguf.py` calls `huggingface_hub.hf_hub_download` against `TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF` automatically. No manual fetch required. Override with `--gguf-path <local_file>` if already present.
+
+---
+
+## 5. Reproduction Pipeline (single platform, fastest path)
+
+Quickest reproduction for the platform you sit at (Apple M4 Pro, Mac CPU, or Linux CUDA — Windows: skip to §6.4–6.5):
 
 ```bash
-python benchmark_gguf.py --device mps --precision q8
-python benchmark_gguf.py --device mps --precision q4
+bash run_all.sh mps  tinyllama fp16          # macOS M4 Pro Metal
+bash run_all.sh cpu  tinyllama fp16          # Mac CPU (writes m4pro_cpu)
+bash run_all.sh cuda tinyllama fp16          # Linux CUDA (writes colab_t4)
+
+# GGUF Q8 + Q4 sweep on same machine
+bash run_gguf.sh mps                         # mps | cpu | cuda | windows
 ```
 
-### Full pipeline (benchmark → decompose → KV optimize → plots)
+Then merge + plot (see §7).
+
+---
+
+## 6. Reproduction Pipeline (full 5-platform matrix)
+
+Run on each machine separately, then collect `results/` trees onto a single host before merging.
+
+### 6.1 Apple M4 Pro · MPS
 
 ```bash
-bash run_all.sh <device> <model> <precision>
-# e.g.
-bash run_all.sh mps tinyllama fp16
+python benchmark.py      --device mps --model tinyllama --precision fp16
+bash   run_gguf.sh       mps
+python decomposition.py  --device mps --model tinyllama --prompt-length 128
+python decomposition.py  --device mps --model tinyllama --prompt-length 512
+python optimization.py   --device mps --model tinyllama
 ```
 
-## Latency Decomposition
+### 6.2 Apple M4 Pro · CPU
 
-Measures time in each model component (MLP, QKV projection, attention, RMSNorm, LM head, embedding) using PyTorch forward hooks — not estimated from architecture proportions.
+Same as 6.1 with `--device cpu` and `bash run_gguf.sh cpu`.
+
+### 6.3 NVIDIA T4 (Google Colab)
+
+Colab runtime: *Runtime → Change runtime type → T4 GPU*. After cloning:
 
 ```bash
-python decomposition.py --device mps --model tinyllama
-python decomposition.py --device cuda --model tinyllama
+python benchmark.py      --device cuda --model tinyllama --precision fp16
+python benchmark.py      --device cuda --model tinyllama --precision q8     # bitsandbytes INT8
+python benchmark.py      --device cuda --model tinyllama --precision q4     # bitsandbytes INT4 (NF4)
+bash   run_gguf.sh       cuda
+python decomposition.py  --device cuda --model tinyllama --prompt-length 128
+python decomposition.py  --device cuda --model tinyllama --prompt-length 512
+python optimization.py   --device cuda --model tinyllama
 ```
 
-Output: `results/<platform>/decomp_<model>_<device>.json` with per-component time fractions.
+Move `results/colab_t4/`, `results/decomposition_cuda/`, `results/optimization_cuda/` back to your aggregation host.
 
-## KV-Cache INT8 Quantization
+### 6.4 NVIDIA RTX 3070 Laptop · Windows
 
-Implements symmetric per-(head, token) INT8 quantization of the KV-cache; measures latency before/after and perplexity delta at 512 and 1024 token contexts.
+Both Colab T4 and the RTX 3070 use `--device cuda`, so `benchmark.py` writes to the same `results/colab_t4/` dir by default. Override with `--output-dir`:
+
+```powershell
+.venv\Scripts\activate
+
+python benchmark.py     --device cuda --model tinyllama --precision fp16 
+                        --output-dir results/windows_3070
+
+# run_gguf.sh hardcodes PLATFORM_TAG=colab_t4 for cuda, so call benchmark_gguf.py directly:
+python benchmark_gguf.py --device cuda --precision q8 --platform-tag windows_3070
+python benchmark_gguf.py --device cuda --precision q4 --platform-tag windows_3070
+
+python decomposition.py --device cuda --model tinyllama --prompt-length 128 
+                        --output-dir results/decomposition_cuda_win
+python decomposition.py --device cuda --model tinyllama --prompt-length 512 
+                        --output-dir results/decomposition_cuda_win
+python optimization.py  --device cuda --model tinyllama 
+                        --output-dir results/optimization_cuda_win
+```
+
+### 6.5 Intel i7-11370H · Windows CPU
+
+```powershell
+.venv\Scripts\activate
+
+python benchmark.py     --device cpu --model tinyllama --precision fp16 
+                        --output-dir results/windows_cpu
+
+bash run_gguf.sh windows                     # this branch correctly sets PLATFORM_TAG=windows_cpu
+
+python decomposition.py --device cpu --model tinyllama --prompt-length 128 
+                        --output-dir results/decomposition_cpu_win
+python decomposition.py --device cpu --model tinyllama --prompt-length 512 
+                        --output-dir results/decomposition_cpu_win
+python optimization.py  --device cpu --model tinyllama ^
+                        --output-dir results/optimization_cpu_win
+```
+
+> **Note** — Tiger Lake lacks AVX-512 BF16 used by recent PyTorch CPU kernels, so FP16 falls back to scalar FP32. Produces the deliberate ~50× outlier (≈0.45 tok/s).
+
+---
+
+## 7. Analysis Pipeline
+
+Once `results/` populated:
 
 ```bash
-python optimization.py --device mps --model tinyllama
-python optimization.py --device cuda --model tinyllama
+python -m analysis.merge_results          # → results/merged.csv  (91 rows for full 5-platform matrix)
+python -m analysis.plot_results           # → figures/01–06, 11–13
+python -m analysis.roofline               # → figures/09_roofline.png, 10_bw_utilization.png
 ```
 
-Output: `results/optimization_<platform>/kvq_<model>_<device>.json`.
+Re-runs idempotent. Figures written at 300 DPI.
 
-**Finding:** INT8 KV halves cache memory (1.94× reduction) but yields no latency benefit — KV traffic is ~1% of total memory bandwidth (dominated by 2.2 GB FP16 weight streaming). Perplexity delta < 0.1 on all platforms.
+---
 
-## Analysis & Plots
+## 8. Output Schemas
 
-Merge results across platforms, then generate all figures:
+### 8.1 Per-cell timing JSON (`benchmark.py`, `benchmark_gguf.py`)
 
-```bash
-python analysis/merge_results.py          # produces results/merged.csv
-python analysis/plot_results.py           # produces figures/0*_*.png
-python analysis/roofline.py               # produces figures/09_roofline.png
+```jsonc
+{
+  "env": { "platform": "...", "torch": "...", "cuda": "..." },
+  "device": "mps", "backend": "pytorch", "model": "tinyllama",
+  "precision": "fp16", "platform_tag": "m4pro_mps",
+  "prompt_lengths": [32, 64, 128, 256, 512, 1024],
+  "trials": [
+    {
+      "prompt_length": 128,
+      "ttft_ms":  { "raw": [...], "filtered": [...], "median": ... },
+      "decode_ms":{ "raw": [...], "filtered": [...], "median": ... },
+      "throughput_tps": ...,
+      "total_ms": ...
+    }
+  ]
+}
 ```
 
-Figures generated:
-- `01_ttft_vs_plen.png` — TTFT vs prompt length
-- `02_decode_vs_plen.png` — per-token latency vs context length
-- `03_throughput.png` — throughput vs prompt length
-- `04_platform_summary.png` — cross-platform bar chart
-- `05_decomp_<platform>.png` — latency decomposition stacked bars
-- `06_kvq_<platform>.png` — KV quantization before/after
-- `08_throughput_vs_bw.png` — throughput vs memory bandwidth scatter (R² = 0.978)
-- `09_roofline.png` — roofline model (log-log)
-- `10_bw_utilization.png` — bandwidth utilization % vs context length
-- `11_cuda_precision.png` — CUDA precision comparison
-- `12_precision_per_platform.png` — quantization speedup per platform
-- `13_quant_speedup_heatmap.png` — quantization speedup heatmap
+### 8.2 Decomposition JSON (`decomposition.py`)
 
-## Methodology
+7 buckets (per layer, summed): `embedding`, `rmsnorm`, `qkv_projection`, `attention_full`, `attn_output_proj`, `mlp_full`, `lm_head`. Stored as ms-per-component plus normalized fractions.
 
-- **Trials:** 3 warmup (excluded) + 10 timed trials per configuration
-- **Outlier filtering:** IQR-based
-- **Synchronization:**
-  - MPS: `torch.mps.synchronize()` before/after
-  - CUDA: `torch.cuda.Event(enable_timing=True)`
-  - CPU: `time.perf_counter_ns()`
-- **Batch size:** 1 (decode regime)
-- **Prompt lengths:** 32, 64, 128, 256, 512, 1024 tokens
-- **Output tokens:** 128 per trial
+### 8.3 KV-quant JSON (`optimization.py`)
 
-## Project Layout
+Baseline FP16 KV vs symmetric per-(head, token) INT8 KV. Records latency, KV bytes, perplexity at p ∈ {512, 1024}.
+
+### 8.4 `results/merged.csv`
 
 ```
-benchmark.py          # Phase 1: timing harness (TTFT, per-token, throughput)
-benchmark_gguf.py     # Phase 1b: GGUF/llama.cpp harness (Q8_0, Q4_K_M)
-decomposition.py      # Phase 2: forward-hook latency decomposition
-optimization.py       # Phase 4: INT8 KV-cache quantization
-energy.py             # Phase 5: powermetrics energy-per-token (macOS)
-run_all.sh            # Full PyTorch pipeline
-run_gguf.sh           # GGUF Q8+Q4 runner
-analysis/
-  merge_results.py    # Merge cross-platform JSON → merged.csv
-  plot_results.py     # Generate all figures
-  roofline.py         # Roofline model analysis
-results/              # Raw JSON per platform
-figures/              # Generated plots
+platform_dir, platform, file, device, backend, model, precision,
+prompt_length, ttft_ms_median, decode_ms_median, throughput_median, total_ms_median
 ```
 
-## Key Results
+---
 
-| Platform | FP16 Throughput | BW Utilization |
-|---|---|---|
-| NVIDIA T4 (CUDA) | 31.4 tok/s | ~55% |
-| RTX 3070 Laptop (CUDA) | 14.3–30.4 tok/s | variable (DVFS) |
-| M4 Pro MPS | 17.9 tok/s | ~38% |
-| M4 Pro CPU | 4.9 tok/s | ~29% |
-| Intel i7-11370H | 0.36 tok/s | <5% (ISA fallback) |
+## 9. Reference Numbers (sanity check)
 
-87× throughput gap (T4 vs i7-11370H) explained by AVX-512 absence on i7 forcing PyTorch scalar FP32 fallback. Roofline fit R² = 0.978 confirms memory-bandwidth as the universal bottleneck across mature platforms.
+After running the full matrix, `merged.csv` should reproduce these FP16 means (averaged across 6 prompt lengths):
+
+| platform        | TTFT mean (ms) | decode mean (ms/tok) | throughput mean (tok/s) |
+| --------------- | -------------: | -------------------: | ----------------------: |
+| `colab_t4`      |          86.77 |                24.07 |                   39.24 |
+| `m4pro_mps`     |         264.06 |                31.35 |                   31.56 |
+| `windows_3070`  |         164.28 |                47.39 |                   19.00 |
+| `m4pro_cpu`     |        3602.46 |                42.38 |                   17.44 |
+| `windows_cpu`   |      309188.88 |              1049.10 |                    0.45 |
+
+Roofline regression on the three mature platforms (colab_t4, m4pro_mps, m4pro_cpu): **R² = 0.978**.
+KV-cache INT8 quant: **1.94×** memory reduction, **0–36 % decode-latency regression** depending on platform.
+Q4_K_M weight quant on Tiger Lake: **57.6×** speedup vs FP16 baseline.
+
+---
+
+## 10. Methodology Summary
+
+* 3 warmup trials (discarded) + 10 timed trials per `(platform, precision, prompt_length)` cell.
+* 1.5× IQR outlier fence applied per cell, then median.
+* Sync primitives:
+  * CUDA → `torch.cuda.Event(enable_timing=True)`
+  * MPS → `torch.mps.synchronize()` flanking `time.perf_counter_ns`
+  * CPU → `time.perf_counter_ns`
+* Deterministic decoding: greedy (top-k = 1, temperature = 0).
+* Output token count fixed at 128.
+* Decomposition uses PyTorch forward hooks classified by module name pattern (see `decomposition.py:23`).
+* KV-cache quant is post-training symmetric INT8 per `(head, token)`; scale stored in FP16.
+
+---
+
+## 11. Troubleshooting
+
+| Symptom                                             | Fix                                                                                                |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `RuntimeError: MPS backend out of memory`           | Drop `--prompt-length 1024` to 512, or set `PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0`.                 |
+| `bitsandbytes` import fails on CUDA                 | Match CUDA toolkit ↔ wheel: `pip install bitsandbytes --extra-index-url <cuXXX>`.                  |
+| `llama_cpp` segfault on macOS                       | `pip install --force-reinstall --no-cache-dir CMAKE_ARGS="-DGGML_METAL=on" llama-cpp-python`.      |
+| Decode times wildly variable on RTX 3070 Laptop     | DVFS / thermal — plug in, set Windows power plan to *Best Performance*, raise `--trials` to 20.    |
+| `merge_results.py` skips a platform                 | Confirm directory naming: `results/<platform>/` matches one of the five tags in §2.                |
+| Tiger Lake FP16 throughput ≈ 0.4 tok/s              | Expected — AVX-512 absent, scalar FP32 fallback.                                                   |
+| Two CUDA boxes overwrite each other's results       | Pass `--output-dir results/windows_3070` to `benchmark.py`, `decomposition.py`, `optimization.py`. |
+| `benchmark_gguf.py` writes to wrong platform dir    | Pass `--platform-tag <tag>` directly (not via `run_gguf.sh`, which hardcodes `colab_t4` for cuda). |
